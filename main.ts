@@ -3,12 +3,16 @@
 // Idea in one paragraph: an earn rate printed by Exophase is a count in
 // disguise. rate * players / 100 is (very nearly) an integer number of
 // earners, and the page only changes at refresh moments, so the history
-// is a staircase, not a smooth series. This program rebuilds the two
-// underlying counts — tracked players and per-trophy earners — collapses
-// the staircase into refresh epochs, extrapolates each count separately
-// in log-time, and only then divides them back into a rate. The division
-// is the whole game over a multi-day horizon: players dilute, earners
-// accumulate, and each trophy's rate is the race between the two.
+// is a staircase, not a smooth series. This program collapses the
+// staircase into refresh epochs, rebuilds the two underlying counts —
+// tracked players and per-trophy earners — and extrapolates both in
+// log-time. The headline median, though, is led by the direct logit
+// trend of the rate itself: over a multi-day horizon the players
+// extrapolation proved to be the noisiest link, so the counts ratio
+// (earners over players) is kept as a bounded sanity check on the
+// trend, not as an equal partner. Players still dilute and earners
+// still accumulate; the model just refuses to let its weakest
+// estimate steer the answer.
 
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -306,11 +310,19 @@ function forecastCase(data: CaseData): TrophyForecast[] {
     const earnerSlope = clampNum(0.55 * r.earnerFit.slope + 0.45 * (poolEarnerSlope.get(r.kind) ?? 0), -1.2, 3.2);
     const logitLast = logitOfPercent(r.lastRate);
 
-    // Two views of the median, then a blend in logit space.
+    // Two views of the median. v2 evidence (multi-scenario lab, two
+    // independent ground-truth families) demoted the counts view: its
+    // players extrapolation is the weakest link in the chain, and a
+    // 45% blend weight dragged the median toward that error on every
+    // long-horizon scenario tested. The direct logit trend now leads;
+    // the counts view survives only as a bounded sanity nudge, capped
+    // at a fifth of a logit, so a genuine divergence between the two
+    // views can still pull the median a little without steering it.
     const logitDirect = logitLast + logitSlope * dx;
     const earnersHat = Math.max(0, Math.exp(Math.log(r.lastEarners + 0.5) + earnerSlope * dx) - 0.5);
     const rateFromCounts = clampNum((earnersHat / playersTarget) * 100, 0.01, 99.99);
-    let medianLogit = 0.55 * logitDirect + 0.45 * logitOfPercent(rateFromCounts);
+    const countsLogit = logitOfPercent(rateFromCounts);
+    let medianLogit = logitDirect + clampNum(0.15 * (countsLogit - logitDirect), -0.2, 0.2);
 
     // Spread: random walk over the horizon plus fit uncertainty.
     const classResid = poolResid.get(r.kind) ?? allResid;
